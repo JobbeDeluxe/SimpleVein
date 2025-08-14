@@ -5,12 +5,9 @@ import org.bukkit.block.Block;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
-import org.bukkit.enchantments.Enchantment;
-import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
 import org.bukkit.event.block.BlockBreakEvent;
-import org.bukkit.event.block.BlockExpEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -19,8 +16,10 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class SimpleVeinPlugin extends JavaPlugin implements Listener {
 
+    // Verhindert Re-Entry (wenn wir intern weitere Blöcke brechen)
+    private static final ThreadLocal<Boolean> IN_VEIN = ThreadLocal.withInitial(() -> false);
+
     private final Set<UUID> toggledOff = ConcurrentHashMap.newKeySet();
-    private final Random rng = new Random();
 
     private Set<Material> whitelist;
     private Set<Material> allowedTools;
@@ -65,6 +64,9 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onBreak(BlockBreakEvent e) {
+        // Wenn dieses Event aus unserem internen Abbau kommt, NICHT erneut vein-minen
+        if (IN_VEIN.get()) return;
+
         Player p = e.getPlayer();
         Block start = e.getBlock();
 
@@ -77,13 +79,11 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
         Material type = start.getType();
         if (!whitelist.contains(type)) return;
 
-        veinMine(p, start, type, tool);
+        veinMine(p, start, type);
     }
 
-    private void veinMine(Player p, Block start, Material type, ItemStack tool) {
-        // BFS-Queue
+    private void veinMine(Player p, Block start, Material type) {
         ArrayDeque<Block> q = new ArrayDeque<>();
-        // besucht nach Welt+Koordinate deduplizieren
         HashSet<String> seen = new HashSet<>();
 
         q.add(start);
@@ -93,48 +93,35 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
 
         while (!q.isEmpty()) {
             Block b = q.poll();
-            boolean isStart = (b.equals(start));
+
+            boolean isStart = b.getX()==start.getX() && b.getY()==start.getY() && b.getZ()==start.getZ()
+                    && b.getWorld().equals(start.getWorld());
 
             if (!isStart) {
                 if (extraBroken >= maxBlocks && !p.hasPermission("simplevein.bypass-limit")) break;
 
-                // Typ checken (könnte sich verändert haben)
+                // Block kann sich geändert haben
                 if (b.getType() != type) continue;
 
-                // Schutz-Plugins respektieren
-                BlockBreakEvent probe = new BlockBreakEvent(b, p);
-                Bukkit.getPluginManager().callEvent(probe);
-                if (probe.isCancelled()) continue;
-
-                // natürlich abbauen; nur wenn wirklich abgebaut wurde, XP etc.
-                boolean brokenNow = b.breakNaturally(tool);
-                if (!brokenNow) continue;
+                // Vanilla-/Paper-Weg: Spieler bricht den Block → Events, Claims, Drops, XP alles korrekt
+                boolean old = IN_VEIN.get();
+                IN_VEIN.set(true);
+                boolean ok;
+                try {
+                    ok = p.breakBlock(b);  // Paper API
+                } finally {
+                    IN_VEIN.set(old);
+                }
+                if (!ok) continue; // abgebrochen oder nicht erlaubt
 
                 extraBroken++;
-
-                // XP wie Vanilla für Zusatzblöcke
-                int baseXp = vanillaXpFor(p, tool, type);
-                if (baseXp > 0) {
-                    BlockExpEvent xpEv = new BlockExpEvent(b, baseXp);
-                    Bukkit.getPluginManager().callEvent(xpEv);
-                    int toDrop = Math.max(0, xpEv.getExpToDrop());
-                    if (toDrop > 0) {
-                        Location drop = b.getLocation().add(0.5, 0.5, 0.5);
-                        b.getWorld().spawn(drop, ExperienceOrb.class, orb -> orb.setExperience(toDrop));
-                    }
-                }
-
-                // Tool kaputt? raus
-                if (tool != null && tool.getType() == Material.AIR) break;
             }
 
             // Nachbarn sammeln
             for (Block nb : neighbors(b, diagonals)) {
                 if (nb.getType() == type) {
                     String k = keyOf(nb);
-                    if (seen.add(k)) {
-                        q.add(nb);
-                    }
+                    if (seen.add(k)) q.add(nb);
                 }
             }
         }
@@ -143,47 +130,6 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
     private String keyOf(Block b) {
         Location l = b.getLocation();
         return l.getWorld().getUID() + ":" + l.getBlockX() + ":" + l.getBlockY() + ":" + l.getBlockZ();
-    }
-
-    private int vanillaXpFor(Player p, ItemStack tool, Material type) {
-        // Creative/Adventure -> kein XP-Drop
-        GameMode gm = p.getGameMode();
-        if (gm == GameMode.CREATIVE || gm == GameMode.ADVENTURE) return 0;
-
-        // Silk Touch -> kein XP-Drop
-        if (tool != null && tool.containsEnchantment(Enchantment.SILK_TOUCH)) return 0;
-
-        switch (type) {
-            case COAL_ORE:
-            case DEEPSLATE_COAL_ORE:
-                return rnd(0, 2);
-            case DIAMOND_ORE:
-            case DEEPSLATE_DIAMOND_ORE:
-            case EMERALD_ORE:
-            case DEEPSLATE_EMERALD_ORE:
-                return rnd(3, 7);
-            case LAPIS_ORE:
-            case DEEPSLATE_LAPIS_ORE:
-            case NETHER_QUARTZ_ORE:
-                return rnd(2, 5);
-            case REDSTONE_ORE:
-            case DEEPSLATE_REDSTONE_ORE:
-                return rnd(1, 5);
-            case NETHER_GOLD_ORE:
-                return rnd(0, 1);
-            // kein XP bei diesen:
-            case COPPER_ORE:
-            case DEEPSLATE_COPPER_ORE:
-            case ANCIENT_DEBRIS:
-                return 0;
-            default:
-                return 0;
-        }
-    }
-
-    private int rnd(int min, int max) {
-        if (max <= min) return min;
-        return rng.nextInt((max - min) + 1) + min;
     }
 
     private List<Block> neighbors(Block b, boolean diag) {
@@ -203,7 +149,7 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
             for (int dy = -1; dy <= 1; dy++)
                 for (int dz = -1; dz <= 1; dz++) {
                     if (dx == 0 && dy == 0 && dz == 0) continue;
-                    if ((Math.abs(dx) + Math.abs(dy) + Math.abs(dz)) == 1) continue; // schon oben abgedeckt
+                    if ((Math.abs(dx) + Math.abs(dy) + Math.abs(dz)) == 1) continue; // schon oben
                     list.add(w.getBlockAt(x + dx, y + dy, z + dz));
                 }
         return list;
@@ -223,7 +169,7 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
         }
 
         if (!s.hasPermission("simplevein.use")) {
-            s.sendMessage("§cKeine Berechtigung.");
+            p.sendMessage("§cKeine Berechtigung.");
             return true;
         }
 
@@ -238,26 +184,16 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
             return true;
         }
 
-        if (args[0].equalsIgnoreCase("on")) {
-            toggledOff.remove(p.getUniqueId());
-            p.sendMessage("§eSimpleVein: §aAN");
-            return true;
-        }
-        if (args[0].equalsIgnoreCase("off")) {
-            toggledOff.add(p.getUniqueId());
-            p.sendMessage("§eSimpleVein: §cAUS");
-            return true;
-        }
+        if (args[0].equalsIgnoreCase("on"))  { toggledOff.remove(p.getUniqueId()); p.sendMessage("§eSimpleVein: §aAN"); return true; }
+        if (args[0].equalsIgnoreCase("off")) { toggledOff.add(p.getUniqueId());   p.sendMessage("§eSimpleVein: §cAUS"); return true; }
+
         if (args[0].equalsIgnoreCase("reload")) {
-            if (!p.hasPermission("simplevein.reload")) {
-                p.sendMessage("§cKeine Berechtigung.");
-                return true;
-            }
+            if (!p.hasPermission("simplevein.reload")) { p.sendMessage("§cKeine Berechtigung."); return true; }
             reloadConfig(); reloadLocal();
             p.sendMessage("§eSimpleVein neu geladen.");
             return true;
         }
-        s.sendMessage("§7/vein [toggle|on|off|reload]");
+        p.sendMessage("§7/vein [toggle|on|off|reload]");
         return true;
     }
 }

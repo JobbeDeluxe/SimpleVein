@@ -74,64 +74,79 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
         ItemStack tool = p.getInventory().getItemInMainHand();
         if (!isAllowedTool(tool)) return;
 
-        Material target = start.getType();
-        if (!whitelist.contains(target)) return;
+        Material type = start.getType();
+        if (!whitelist.contains(type)) return;
 
-        veinMine(p, start, target, tool);
+        veinMine(p, start, type, tool);
     }
 
     private void veinMine(Player p, Block start, Material type, ItemStack tool) {
-        Queue<Block> q = new ArrayDeque<>();
-        Set<Block> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        // BFS-Queue
+        ArrayDeque<Block> q = new ArrayDeque<>();
+        // besucht nach Welt+Koordinate deduplizieren
+        HashSet<String> seen = new HashSet<>();
 
         q.add(start);
-        seen.add(start);
+        seen.add(keyOf(start));
 
-        int broken = 0;
+        int extraBroken = 0;
 
         while (!q.isEmpty()) {
             Block b = q.poll();
-            boolean isStart = (b == start);
+            boolean isStart = (b.equals(start));
 
             if (!isStart) {
-                if (broken >= maxBlocks && !p.hasPermission("simplevein.bypass-limit")) break;
+                if (extraBroken >= maxBlocks && !p.hasPermission("simplevein.bypass-limit")) break;
 
-                // respektiere Schutz-Plugins
+                // Typ checken (könnte sich verändert haben)
+                if (b.getType() != type) continue;
+
+                // Schutz-Plugins respektieren
                 BlockBreakEvent probe = new BlockBreakEvent(b, p);
                 Bukkit.getPluginManager().callEvent(probe);
                 if (probe.isCancelled()) continue;
 
-                // zuerst abbauen ...
-                b.breakNaturally(tool);
-                broken++;
+                // natürlich abbauen; nur wenn wirklich abgebaut wurde, XP etc.
+                boolean brokenNow = b.breakNaturally(tool);
+                if (!brokenNow) continue;
 
-                // ... dann XP wie Vanilla behandeln
+                extraBroken++;
+
+                // XP wie Vanilla für Zusatzblöcke
                 int baseXp = vanillaXpFor(p, tool, type);
                 if (baseXp > 0) {
                     BlockExpEvent xpEv = new BlockExpEvent(b, baseXp);
                     Bukkit.getPluginManager().callEvent(xpEv);
                     int toDrop = Math.max(0, xpEv.getExpToDrop());
                     if (toDrop > 0) {
-                        b.getWorld().spawn(b.getLocation().add(0.5, 0.5, 0.5), ExperienceOrb.class, orb -> orb.setExperience(toDrop));
+                        Location drop = b.getLocation().add(0.5, 0.5, 0.5);
+                        b.getWorld().spawn(drop, ExperienceOrb.class, orb -> orb.setExperience(toDrop));
                     }
                 }
 
-                // Tool kaputt?
+                // Tool kaputt? raus
                 if (tool != null && tool.getType() == Material.AIR) break;
             }
 
             // Nachbarn sammeln
             for (Block nb : neighbors(b, diagonals)) {
-                if (nb.getType() == type && !seen.contains(nb)) {
-                    seen.add(nb);
-                    q.add(nb);
+                if (nb.getType() == type) {
+                    String k = keyOf(nb);
+                    if (seen.add(k)) {
+                        q.add(nb);
+                    }
                 }
             }
         }
     }
 
+    private String keyOf(Block b) {
+        Location l = b.getLocation();
+        return l.getWorld().getUID() + ":" + l.getBlockX() + ":" + l.getBlockY() + ":" + l.getBlockZ();
+    }
+
     private int vanillaXpFor(Player p, ItemStack tool, Material type) {
-        // Kreativ/Adventure -> kein XP-Drop
+        // Creative/Adventure -> kein XP-Drop
         GameMode gm = p.getGameMode();
         if (gm == GameMode.CREATIVE || gm == GameMode.ADVENTURE) return 0;
 
@@ -155,8 +170,8 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
             case DEEPSLATE_REDSTONE_ORE:
                 return rnd(1, 5);
             case NETHER_GOLD_ORE:
-                return rnd(0, 1); // laut Wiki 0–1
-            // keine XP beim Abbau:
+                return rnd(0, 1);
+            // kein XP bei diesen:
             case COPPER_ORE:
             case DEEPSLATE_COPPER_ORE:
             case ANCIENT_DEBRIS:
@@ -188,7 +203,7 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
             for (int dy = -1; dy <= 1; dy++)
                 for (int dz = -1; dz <= 1; dz++) {
                     if (dx == 0 && dy == 0 && dz == 0) continue;
-                    if ((Math.abs(dx) + Math.abs(dy) + Math.abs(dz)) == 1) continue; // schon oben
+                    if ((Math.abs(dx) + Math.abs(dy) + Math.abs(dz)) == 1) continue; // schon oben abgedeckt
                     list.add(w.getBlockAt(x + dx, y + dy, z + dz));
                 }
         return list;

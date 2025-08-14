@@ -1,14 +1,16 @@
 package dev.yourserver.simplevein;
 
-import org.bukkit.Bukkit;
-import org.bukkit.Material;
+import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockExpEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -18,9 +20,11 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SimpleVeinPlugin extends JavaPlugin implements Listener {
 
     private final Set<UUID> toggledOff = ConcurrentHashMap.newKeySet();
+    private final Random rng = new Random();
+
     private Set<Material> whitelist;
     private Set<Material> allowedTools;
-    private boolean disableWhenSneaking;  // NEU
+    private boolean disableWhenSneaking;
     private int maxBlocks;
     private boolean diagonals;
     private boolean enabledByDefault;
@@ -30,13 +34,13 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
         saveDefaultConfig();
         reloadLocal();
         Bukkit.getPluginManager().registerEvents(this, this);
-        getLogger().info("SimpleVein aktiviert (invertierte Sneak-Steuerung: " + disableWhenSneaking + ").");
+        getLogger().info("SimpleVein aktiv (Sneak deaktiviert: " + disableWhenSneaking + ").");
     }
 
     private void reloadLocal() {
         FileConfiguration cfg = getConfig();
         enabledByDefault     = cfg.getBoolean("enabled-by-default", true);
-        disableWhenSneaking  = cfg.getBoolean("disable-when-sneaking", true); // NEU
+        disableWhenSneaking  = cfg.getBoolean("disable-when-sneaking", true);
         maxBlocks            = Math.max(1, cfg.getInt("max-blocks", 64));
         diagonals            = cfg.getBoolean("diagonals", false);
 
@@ -65,8 +69,6 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
         Block start = e.getBlock();
 
         if (!isEnabledFor(p)) return;
-
-        // NEU: VeinMining ist generell an, aber Sneak deaktiviert es
         if (disableWhenSneaking && p.isSneaking()) return;
 
         ItemStack tool = p.getInventory().getItemInMainHand();
@@ -89,26 +91,36 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
 
         while (!q.isEmpty()) {
             Block b = q.poll();
-
-            // Startblock NICHT hier abbauen -> lässt Minecraft selbst erledigen
             boolean isStart = (b == start);
+
             if (!isStart) {
                 if (broken >= maxBlocks && !p.hasPermission("simplevein.bypass-limit")) break;
 
-                // Schutz-Plugins respektieren
+                // respektiere Schutz-Plugins
                 BlockBreakEvent probe = new BlockBreakEvent(b, p);
                 Bukkit.getPluginManager().callEvent(probe);
                 if (probe.isCancelled()) continue;
 
-                // natürlich abbauen (Fortune/Silk/Haltbarkeit etc.)
+                // zuerst abbauen ...
                 b.breakNaturally(tool);
                 broken++;
 
-                // Tool kaputt? abbrechen
-                if (tool.getType() == Material.AIR) break;
+                // ... dann XP wie Vanilla behandeln
+                int baseXp = vanillaXpFor(p, tool, type);
+                if (baseXp > 0) {
+                    BlockExpEvent xpEv = new BlockExpEvent(b, baseXp);
+                    Bukkit.getPluginManager().callEvent(xpEv);
+                    int toDrop = Math.max(0, xpEv.getExpToDrop());
+                    if (toDrop > 0) {
+                        b.getWorld().spawn(b.getLocation().add(0.5, 0.5, 0.5), ExperienceOrb.class, orb -> orb.setExperience(toDrop));
+                    }
+                }
+
+                // Tool kaputt?
+                if (tool != null && tool.getType() == Material.AIR) break;
             }
 
-            // Nachbarn sammeln (auch beim Start, damit die Ader sich ausbreitet)
+            // Nachbarn sammeln
             for (Block nb : neighbors(b, diagonals)) {
                 if (nb.getType() == type && !seen.contains(nb)) {
                     seen.add(nb);
@@ -118,10 +130,51 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    private int vanillaXpFor(Player p, ItemStack tool, Material type) {
+        // Kreativ/Adventure -> kein XP-Drop
+        GameMode gm = p.getGameMode();
+        if (gm == GameMode.CREATIVE || gm == GameMode.ADVENTURE) return 0;
+
+        // Silk Touch -> kein XP-Drop
+        if (tool != null && tool.containsEnchantment(Enchantment.SILK_TOUCH)) return 0;
+
+        switch (type) {
+            case COAL_ORE:
+            case DEEPSLATE_COAL_ORE:
+                return rnd(0, 2);
+            case DIAMOND_ORE:
+            case DEEPSLATE_DIAMOND_ORE:
+            case EMERALD_ORE:
+            case DEEPSLATE_EMERALD_ORE:
+                return rnd(3, 7);
+            case LAPIS_ORE:
+            case DEEPSLATE_LAPIS_ORE:
+            case NETHER_QUARTZ_ORE:
+                return rnd(2, 5);
+            case REDSTONE_ORE:
+            case DEEPSLATE_REDSTONE_ORE:
+                return rnd(1, 5);
+            case NETHER_GOLD_ORE:
+                return rnd(0, 1); // laut Wiki 0–1
+            // keine XP beim Abbau:
+            case COPPER_ORE:
+            case DEEPSLATE_COPPER_ORE:
+            case ANCIENT_DEBRIS:
+                return 0;
+            default:
+                return 0;
+        }
+    }
+
+    private int rnd(int min, int max) {
+        if (max <= min) return min;
+        return rng.nextInt((max - min) + 1) + min;
+    }
+
     private List<Block> neighbors(Block b, boolean diag) {
         List<Block> list = new ArrayList<>(diag ? 26 : 6);
         int x = b.getX(), y = b.getY(), z = b.getZ();
-        var w = b.getWorld();
+        World w = b.getWorld();
         // 6-Achsen
         list.add(w.getBlockAt(x + 1, y, z));
         list.add(w.getBlockAt(x - 1, y, z));
@@ -193,4 +246,3 @@ public class SimpleVeinPlugin extends JavaPlugin implements Listener {
         return true;
     }
 }
-

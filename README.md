@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#-license)
 [![Release](https://img.shields.io/github/v/release/JobbeDeluxe/SimpleVein?sort=semver)](https://github.com/JobbeDeluxe/SimpleVein/releases)
 [![Downloads](https://img.shields.io/github/downloads/JobbeDeluxe/SimpleVein/total.svg)](https://github.com/JobbeDeluxe/SimpleVein/releases)
+
 A tiny, server-side **Paper/Spigot** plugin that adds **Vein Mining** for ores – designed to be **fast**, **safe** (respects protection plugins), and **simple to configure**.
 
 > Default behavior: VeinMining is **always ON**. If a player **sneaks**, VeinMining is **disabled** for that break (invert control).
